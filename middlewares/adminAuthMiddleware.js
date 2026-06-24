@@ -1,6 +1,10 @@
 const jwt = require("jsonwebtoken");
 
-const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET || "change-this-admin-secret";
+const ADMIN_JWT_SECRET =
+  process.env.ADMIN_JWT_SECRET ||
+  process.env.JWT_SECRET ||
+  "change-this-admin-secret";
+const INTERNAL_SERVICE_KEY = process.env.INTERNAL_SERVICE_KEY || "";
 
 function signAdminToken(adminId) {
   return jwt.sign({ adminId }, ADMIN_JWT_SECRET, { expiresIn: "7d" });
@@ -19,7 +23,8 @@ function verifyAdmin(req, res, next) {
 
     const decoded = jwt.verify(token, ADMIN_JWT_SECRET);
     req.adminId = decoded.adminId;
-    next();
+    req.authMethod = "admin-jwt";
+    return next();
   } catch (_) {
     return res.status(401).json({
       success: false,
@@ -28,7 +33,17 @@ function verifyAdmin(req, res, next) {
   }
 }
 
+function verifyAdminOrServiceKey(req, res, next) {
+  const serviceKey = req.get("X-Service-Key")?.trim();
+  if (INTERNAL_SERVICE_KEY && serviceKey === INTERNAL_SERVICE_KEY) {
+    req.authMethod = "service-key";
+    return next();
+  }
+  return verifyAdmin(req, res, next);
+}
+
 module.exports = {
   signAdminToken,
   verifyAdmin,
+  verifyAdminOrServiceKey,
 };

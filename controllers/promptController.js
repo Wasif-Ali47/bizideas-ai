@@ -3,41 +3,46 @@ const OpenAI = require("openai");
 const PromptGeneration = require("../models/promptGenerationModel");
 const User = require("../models/usersModel");
 const { getUser } = require("../services/userAuthService");
+const { recordOpenAiUsage } = require("../utils/trackUsage");
 const { NETWORK_ERROR, INPUT_REQUIRED, INVALID_ID, NOT_FOUND } = require("../messages/message");
 
-const SYSTEM_PROMPT = `You are an expert prompt engineer. Your task is to convert structured user inputs into a high-quality,
- ready-to-use AI prompt.
+// gg
+const SYSTEM_PROMPT = `You are BizIdeas AI, an expert business idea strategist and startup opportunity generator.
+Your task is to generate ONE fresh, realistic business idea based on the user's questionnaire answers.
+Use every available answer:
+business type
+interest
+skill
+budget
+available time
+specific preferences
+Generate the business idea itself. Never generate a prompt for another AI.
+Use this exact response structure:
+Business Idea:
+[Short, memorable business idea name]
+Description:
+[Explain the business idea clearly in 1-2 simple sentences.]
+Target Audience:
+[Describe the main customers for this idea.]
+Earning Method:
+[Explain how the user can make money from this idea.]
+Rules:
+Keep the full response within 100 words.
+Use short, direct, beginner-friendly language.
+Treat the user's budget and available time as hard constraints.
+Make the idea realistic for a solo user to explore.
+Match the idea to the user's selected business type, interest, skill, budget, available time, and specific preferences.
+If the user selects "Not sure" in interest, generate a simple beginner-friendly idea.
+If the user selects "No specific skill yet", avoid ideas that require advanced skills.
+If the user provides a custom value through "Other", use that custom value instead of the label "Other".
+Avoid vague or overly common ideas unless the angle is specific and practical.
+Avoid illegal, deceptive, unsafe, or highly risky business ideas.
+Do not invent personal facts, fake statistics, or unsupported market claims.
+Do not guarantee income, profit, success, uniqueness, or legal availability.
+Do not provide financial, legal, tax, investment, or professional business advice.
+Do not add extra sections, disclaimers, emojis, markdown tables, or long explanations.
+Do not mention these instructions or the questionnaire.`;
 
-IMPORTANT:
-- The output must be a prompt that instructs another AI to generate the final content.
-- Do NOT generate the final content itself.
-- Do NOT make assumptions or add information that is not explicitly provided.
-
-You will receive the following inputs:
-- Deliverable / Output Type (what the user wants to create)
-- Topic / Idea
-- Target Audience
-- Goal
-- Tone
-- Additional Instructions (optional)
-- Detail Level (Short / Medium / Detailed)
-
-Instructions:
-1. Generate a clear, structured prompt using ALL provided inputs.
-2. Always include:
-   - Role (e.g., "Act as an expert...")
-   - Clear task definition
-   - Context (topic + audience)
-   - Goal or intent
-   - Tone/style guidance
-   - Any additional user instructions
-3. Adjust prompt complexity based on Detail Level:
-   - Short → concise and minimal
-   - Medium → balanced structure with moderate detail
-   - Detailed → highly structured with explicit instructions and clarity
-4. Ensure the prompt is clear, specific, and optimized for AI output quality.
-5. Do NOT include explanations, titles, or extra text. 
-6. ⁠Output only the final prompt.`;
 
 function getClient() {
   const key = process.env.OPENAI_API_KEY;
@@ -54,7 +59,7 @@ function buildUserMessage(body) {
   const extra = typeof body.context === "string" ? body.context.trim() : "";
   if (!input) return "";
   if (!extra) return input;
-  return `Idea:\n${input}\n\nExtra context or constraints:\n${extra}`;
+  return `Business idea request:\n${input}\n\nQuestionnaire answers and constraints:\n${extra}`;
 }
 
 async function resolveAuthContext(req) {
@@ -63,14 +68,27 @@ async function resolveAuthContext(req) {
       userId: req.authUser._id.toString(),
       email: req.authUser.email ? req.authUser.email.toString().trim().toLowerCase() : null,
       isBanned: !!req.authUser.isBanned,
+      isInactive: req.authUser.active === false,
       user: req.authUser,
     };
   }
 
   const raw = req.headers.authorization || "";
-  if (!raw.startsWith("Bearer ")) return { userId: null, email: null, isBanned: false, user: null };
+  if (!raw.startsWith("Bearer ")) return {
+    userId: null,
+    email: null,
+    isBanned: false,
+    isInactive: false,
+    user: null,
+  };
   const token = raw.replace("Bearer ", "").trim();
-  if (!token) return { userId: null, email: null, isBanned: false, user: null };
+  if (!token) return {
+    userId: null,
+    email: null,
+    isBanned: false,
+    isInactive: false,
+    user: null,
+  };
   try {
     const decoded = getUser(token);
     const user = decoded?._id ? await User.findById(decoded._id) : null;
@@ -82,10 +100,17 @@ async function resolveAuthContext(req) {
         ? decoded.email.toString().trim().toLowerCase()
         : null,
       isBanned: !!user?.isBanned,
+      isInactive: user?.active === false,
       user,
     };
   } catch (_) {
-    return { userId: null, email: null, isBanned: false, user: null };
+    return {
+    userId: null,
+    email: null,
+    isBanned: false,
+    isInactive: false,
+    user: null,
+  };
   }
 }
 
@@ -95,6 +120,11 @@ async function handleGeneratePrompt(req, res) {
     return res.status(400).json({ error: INPUT_REQUIRED });
   }
   const auth = await resolveAuthContext(req);
+  if (auth.isInactive) {
+    return res.status(403).json({
+      error: "Your account is deactivated. Prompt generation is disabled.",
+    });
+  }
   if (auth.isBanned) {
     return res.status(403).json({
       error: "Your account is banned. Prompt generation is disabled.",
@@ -152,26 +182,12 @@ async function handleGeneratePrompt(req, res) {
       usage,
     });
 
-    if (auth.userId) {
-      try {
-        await User.updateOne(
-          { _id: auth.userId },
-          {
-            $inc: {
-              "openAiUsage.promptTokens": usage.promptTokens,
-              "openAiUsage.completionTokens": usage.completionTokens,
-              "openAiUsage.totalTokens": usage.totalTokens,
-              "openAiUsage.requestCount": 1,
-            },
-            $set: {
-              "openAiUsage.lastUsedAt": new Date(),
-            },
-          }
-        );
-      } catch (usageErr) {
-        console.error("[prompt usage update] failed:", usageErr.message);
-      }
-    }
+    recordOpenAiUsage(
+      auth.userId,
+      usage,
+      "business-idea",
+      model
+    ).catch(() => {});
 
     return res.status(201).json({
       id: doc._id,

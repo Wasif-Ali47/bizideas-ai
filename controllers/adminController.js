@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const User = require("../models/usersModel");
 const PushDeviceToken = require("../models/pushDeviceTokenModel");
+const ChatUsage = require("../models/chatUsageModel");
 const { ensureFirebaseAdmin } = require("../utils/firebaseAdminInit");
 
 async function getUsers(req, res) {
@@ -17,6 +18,7 @@ async function getUsers(req, res) {
       profession: u.profession || "",
       image: u.image || "",
       emailVerified: !!u.emailVerified,
+      active: u.active !== false,
       isBanned: !!u.isBanned,
       bannedAt: u.bannedAt || null,
       bannedReason: u.bannedReason || "",
@@ -149,22 +151,88 @@ async function setUserBanState(req, res) {
   }
 }
 
+async function toggleUserActive(req, res) {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user id",
+      });
+    }
+
+    const activeValue = req.body?.active;
+    const active =
+      activeValue === true ||
+      activeValue === "true" ||
+      activeValue === 1 ||
+      activeValue === "1";
+
+    const user = await User.findByIdAndUpdate(id, { active }, { new: true })
+      .select("-password");
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: active
+        ? "User activated successfully"
+        : "User deactivated successfully",
+      user: {
+        id: user._id,
+        email: user.email,
+        active: user.active,
+      },
+    });
+  } catch (error) {
+    console.error("[admin:toggleUserActive] error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update user active state",
+      error: error.message,
+    });
+  }
+}
+
 async function getUsageOverview(req, res) {
   try {
-    const agg = await User.aggregate([
-      {
-        $group: {
-          _id: null,
-          users: { $sum: 1 },
-          bannedUsers: {
-            $sum: { $cond: [{ $eq: ["$isBanned", true] }, 1, 0] },
+    const [userAgg, usageAgg] = await Promise.all([
+      User.aggregate([
+        {
+          $group: {
+            _id: null,
+            users: { $sum: 1 },
+            bannedUsers: {
+              $sum: {
+                $cond: [{ $eq: ["$isBanned", true] }, 1, 0],
+              },
+            },
           },
-          totalPromptTokens: { $sum: { $ifNull: ["$openAiUsage.promptTokens", 0] } },
-          totalCompletionTokens: { $sum: { $ifNull: ["$openAiUsage.completionTokens", 0] } },
-          totalTokens: { $sum: { $ifNull: ["$openAiUsage.totalTokens", 0] } },
-          totalRequests: { $sum: { $ifNull: ["$openAiUsage.requestCount", 0] } },
         },
-      },
+      ]),
+      ChatUsage.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalPromptTokens: {
+              $sum: { $ifNull: ["$usage.promptTokens", 0] },
+            },
+            totalCompletionTokens: {
+              $sum: {
+                $ifNull: ["$usage.completionTokens", 0],
+              },
+            },
+            totalTokens: {
+              $sum: { $ifNull: ["$usage.totalTokens", 0] },
+            },
+            totalRequests: { $sum: 1 },
+          },
+        },
+      ]),
     ]);
 
     const topUsers = await User.find({})
@@ -173,13 +241,15 @@ async function getUsageOverview(req, res) {
       .limit(20)
       .lean();
 
-    const summary = agg[0] || {
-      users: 0,
-      bannedUsers: 0,
-      totalPromptTokens: 0,
-      totalCompletionTokens: 0,
-      totalTokens: 0,
-      totalRequests: 0,
+    const summary = {
+      users: userAgg[0]?.users || 0,
+      bannedUsers: userAgg[0]?.bannedUsers || 0,
+      totalPromptTokens:
+        usageAgg[0]?.totalPromptTokens || 0,
+      totalCompletionTokens:
+        usageAgg[0]?.totalCompletionTokens || 0,
+      totalTokens: usageAgg[0]?.totalTokens || 0,
+      totalRequests: usageAgg[0]?.totalRequests || 0,
     };
 
     return res.json({
@@ -301,6 +371,7 @@ module.exports = {
   getUsers,
   updateUser,
   setUserBanState,
+  toggleUserActive,
   getUsageOverview,
   broadcastNotification,
 };

@@ -16,6 +16,11 @@ async function authenticate(req, res, next) {
     const decoded = getUser(token);
     const user = await User.findById(decoded._id);
     if (!user) return res.status(401).json({ error: "User not found" });
+    if (user.active === false) {
+      return res.status(403).json({
+        error: "Your account is deactivated. Please contact support.",
+      });
+    }
     if (user.isBanned) {
       return res.status(403).json({
         error: "Your account is banned. Please contact support.",

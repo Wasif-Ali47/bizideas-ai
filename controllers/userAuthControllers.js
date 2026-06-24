@@ -106,6 +106,11 @@ async function handleUserLogin(req, res) {
 
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ error: USER_NOT_FOUND });
+    if (user.active === false) {
+      return res.status(403).json({
+        error: "Your account is deactivated. Please contact support.",
+      });
+    }
     if (user.isBanned) {
       return res.status(403).json({
         error: "Your account is banned. Please contact support.",
@@ -182,6 +187,11 @@ async function handleGoogleLogin(req, res) {
       if (updated) await user.save();
     }
 
+    if (user.active === false) {
+      return res.status(403).json({
+        error: "Your account is deactivated. Please contact support.",
+      });
+    }
     if (user.isBanned) {
       return res.status(403).json({
         error: "Your account is banned. Please contact support.",

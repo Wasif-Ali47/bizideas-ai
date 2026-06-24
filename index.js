@@ -11,6 +11,8 @@ const adminAuthRouter = require("./routes/adminAuthRoutes");
 const notificationRouter = require("./routes/notificationRoutes");
 const appPromoRouter = require("./routes/appPromoRoutes");
 const adminPromoRouter = require("./routes/adminPromoRoutes");
+const faqRouter = require("./routes/faqRoutes");
+const knowledgeRouter = require("./routes/knowledgeRoutes");
 const { ensureFirebaseAdmin } = require("./utils/firebaseAdminInit");
 
 const mongoUri = process.env.MONGODB_URI;
@@ -25,7 +27,9 @@ const defaultAllowedOrigins = [
   "http://localhost:3000",
   "https://aipromptgenerator.oxmite.com",
   "https://prompt-creator-admin.oxmite.com",
-  // prompt_creator_admin package.json homepage (GitHub Pages)
+  "https://adminofallapss.oxmite.com",
+  "https://allappsadminreact.oxmite.com",
+  // prompt_creator_admin package.json homepage (GitHub Pages)grg
   "https://wasif-ali47.github.io",
 ];
 const allowedOrigins = process.env.CORS_ORIGINS
@@ -45,7 +49,15 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization"],
+  allowedHeaders: [
+    "Origin",
+    "X-Requested-With",
+    "Content-Type",
+    "Accept",
+    "Authorization",
+    "X-Service-Key",
+    "X-Knowledge-Key",
+  ],
   optionsSuccessStatus: 204,
 };
 
@@ -57,6 +69,42 @@ app.options(/.*/, cors(corsOptions));
 app.use(express.json({ limit: "4mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(ensureBody);
+
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/knowledge")) {
+    const startedAt = Date.now();
+    const body = req.body && typeof req.body === "object"
+      ? req.body
+      : {};
+    console.log("[knowledge:request]", {
+      method: req.method,
+      url: req.originalUrl,
+      origin: req.headers.origin || "n/a",
+      contentType: req.headers["content-type"] || "n/a",
+      hasServiceKey: Boolean(req.get("X-Service-Key")),
+      hasKnowledgeKey: Boolean(req.get("X-Knowledge-Key")),
+      hasAuthorization: Boolean(req.get("Authorization")),
+      bodyKeys: Object.keys(body),
+      bulkCount: Array.isArray(body.entries)
+        ? body.entries.length
+        : 0,
+      contentLength:
+        typeof body.content === "string"
+          ? body.content.length
+          : 0,
+    });
+    res.on("finish", () => {
+      console.log("[knowledge:response]", {
+        method: req.method,
+        url: req.originalUrl,
+        status: res.statusCode,
+        authMethod: req.knowledgeAuthMethod || "none",
+        durationMs: Date.now() - startedAt,
+      });
+    });
+  }
+  next();
+});
 
 app.use((req, res, next) => {
   if (req.path.includes("/api/admin/auth/login")) {
@@ -111,6 +159,8 @@ app.use("/auth", userAuthRouter);
 app.use("/api/prompts", promptRouter);
 app.use("/api/notifications", notificationRouter);
 app.use("/api/app-promos", appPromoRouter);
+app.use("/api/faq", faqRouter);
+app.use("/api/knowledge", knowledgeRouter);
 app.use("/api/admin/auth", adminAuthRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/admin/app-promos", adminPromoRouter);

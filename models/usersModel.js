@@ -38,6 +38,11 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    active: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
     isBanned: {
       type: Boolean,
       default: false,
