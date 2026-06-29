@@ -17,6 +17,19 @@ const promptGenerationSchema = new mongoose.Schema(
     input: { type: String, required: true, trim: true },
     generatedPrompt: { type: String, required: true, trim: true },
     model: { type: String, default: "" },
+    generationType: {
+      type: String,
+      enum: ["first", "regenerated"],
+      default: "first",
+      index: true,
+    },
+    generationLabel: {
+      type: String,
+      trim: true,
+      default: "First idea",
+    },
+    tags: [{ type: String, trim: true }],
+    metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
     usage: {
       promptTokens: { type: Number, default: 0 },
       completionTokens: { type: Number, default: 0 },

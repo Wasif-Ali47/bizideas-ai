@@ -3,6 +3,7 @@ const User = require("../models/usersModel");
 const PushDeviceToken = require("../models/pushDeviceTokenModel");
 const ChatUsage = require("../models/chatUsageModel");
 const { ensureFirebaseAdmin } = require("../utils/firebaseAdminInit");
+const { generationLimitForUser } = require("../utils/generationLimits");
 
 async function getUsers(req, res) {
   try {
@@ -11,7 +12,9 @@ async function getUsers(req, res) {
       .sort({ createdAt: -1 })
       .lean();
 
-    const rows = users.map((u) => ({
+    const rows = users.map((u) => {
+      const generationLimit = generationLimitForUser(u);
+      return {
       id: u._id,
       name: u.name || "",
       email: u.email || "",
@@ -19,6 +22,10 @@ async function getUsers(req, res) {
       image: u.image || "",
       emailVerified: !!u.emailVerified,
       active: u.active !== false,
+      isGuest: u.isGuest === true,
+      isPro: u.isPro === true,
+      limit: generationLimit.limit,
+      generationLimit,
       isBanned: !!u.isBanned,
       bannedAt: u.bannedAt || null,
       bannedReason: u.bannedReason || "",
@@ -32,7 +39,8 @@ async function getUsers(req, res) {
         requestCount: Number(u.openAiUsage?.requestCount) || 0,
         lastUsedAt: u.openAiUsage?.lastUsedAt || null,
       },
-    }));
+    };
+    });
 
     return res.json({
       success: true,
@@ -58,7 +66,7 @@ async function updateUser(req, res) {
       });
     }
 
-    const allowedFields = ["name", "profession", "email", "emailVerified"];
+    const allowedFields = ["name", "profession", "email", "emailVerified", "isPro"];
     const payload = {};
     for (const key of allowedFields) {
       if (req.body[key] !== undefined) {
@@ -68,6 +76,13 @@ async function updateUser(req, res) {
 
     if (payload.email && typeof payload.email === "string") {
       payload.email = payload.email.trim().toLowerCase();
+    }
+    if (payload.isPro !== undefined) {
+      payload.isPro =
+        payload.isPro === true ||
+        payload.isPro === "true" ||
+        payload.isPro === 1 ||
+        payload.isPro === "1";
     }
 
     if (Object.keys(payload).length === 0) {
@@ -236,7 +251,7 @@ async function getUsageOverview(req, res) {
     ]);
 
     const topUsers = await User.find({})
-      .select("name email isBanned openAiUsage")
+      .select("name email isGuest isPro isBanned openAiUsage")
       .sort({ "openAiUsage.totalTokens": -1 })
       .limit(20)
       .lean();
@@ -255,10 +270,16 @@ async function getUsageOverview(req, res) {
     return res.json({
       success: true,
       summary,
-      topUsers: topUsers.map((u) => ({
+      topUsers: topUsers.map((u) => {
+        const generationLimit = generationLimitForUser(u);
+        return {
         id: u._id,
         name: u.name || "",
         email: u.email || "",
+        isGuest: u.isGuest === true,
+        isPro: u.isPro === true,
+        limit: generationLimit.limit,
+        generationLimit,
         isBanned: !!u.isBanned,
         openAiUsage: {
           promptTokens: Number(u.openAiUsage?.promptTokens) || 0,
@@ -267,7 +288,8 @@ async function getUsageOverview(req, res) {
           requestCount: Number(u.openAiUsage?.requestCount) || 0,
           lastUsedAt: u.openAiUsage?.lastUsedAt || null,
         },
-      })),
+      };
+      }),
     });
   } catch (error) {
     console.error("[admin:getUsageOverview] error:", error);

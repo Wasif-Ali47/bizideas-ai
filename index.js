@@ -11,6 +11,7 @@ const adminAuthRouter = require("./routes/adminAuthRoutes");
 const notificationRouter = require("./routes/notificationRoutes");
 const appPromoRouter = require("./routes/appPromoRoutes");
 const adminPromoRouter = require("./routes/adminPromoRoutes");
+const savedIdeaRouter = require("./routes/savedIdeaRoutes");
 const faqRouter = require("./routes/faqRoutes");
 const knowledgeRouter = require("./routes/knowledgeRoutes");
 const { ensureFirebaseAdmin } = require("./utils/firebaseAdminInit");
@@ -132,6 +133,11 @@ app.get("/", (req, res) => {
       generate: "POST /api/prompts/generate",
       list: "GET /api/prompts",
       getOne: "GET /api/prompts/:id",
+      savedIdeas: {
+        list: "GET /api/saved-ideas",
+        save: "POST /api/saved-ideas",
+        delete: "DELETE /api/saved-ideas/:id",
+      },
       notifications: {
         registerToken:
           "POST /api/notifications/register-token (token required; userId optional string or Mongo id; JWT optional)",
@@ -157,6 +163,7 @@ app.get("/", (req, res) => {
 
 app.use("/auth", userAuthRouter);
 app.use("/api/prompts", promptRouter);
+app.use("/api/saved-ideas", savedIdeaRouter);
 app.use("/api/notifications", notificationRouter);
 app.use("/api/app-promos", appPromoRouter);
 app.use("/api/faq", faqRouter);

@@ -1,9 +1,13 @@
 const bcrypt = require("bcrypt");
 const mongoose = require("mongoose");
+const fs = require("fs");
+const path = require("path");
 const { OAuth2Client } = require("google-auth-library");
 const { setUser } = require("../services/userAuthService");
 const { sendOTPEmail, sendEmail } = require("../services/emailService");
 const User = require("../models/usersModel");
+const PromptGeneration = require("../models/promptGenerationModel");
+const { generationLimitForUser } = require("../utils/generationLimits");
 const {
   NETWORK_ERROR,
   SIGNED_UP,
@@ -26,7 +30,80 @@ const googleClient = process.env.GOOGLE_CLIENT_ID
   : null;
 
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+function deleteLocalProfileImage(imagePath) {
+  const value = String(imagePath || "").trim();
+  if (!value || value.startsWith("http://") || value.startsWith("https://")) {
+    return;
+  }
+
+  const normalized = value.replace(/\\/g, "/");
+  if (!normalized.startsWith("/uploads/profile/")) {
+    return;
+  }
+
+  const filename = path.basename(normalized);
+  if (!filename) return;
+
+  const profileDir = path.resolve(process.cwd(), "uploads", "profile");
+  const absolutePath = path.resolve(profileDir, filename);
+  if (!absolutePath.startsWith(profileDir + path.sep)) {
+    return;
+  }
+
+  try {
+    if (fs.existsSync(absolutePath)) {
+      fs.unlinkSync(absolutePath);
+      console.log("[profile:image-delete]", { file: filename });
+    }
+  } catch (err) {
+    console.error("[profile:image-delete] failed:", err?.message || err);
+  }
+}
+
+function makeAuthPayload(user, message = LOGGED_IN) {
+  const token = setUser(user);
+  const generationLimit = generationLimitForUser(user);
+  return {
+    success: message,
+    token,
+    userId: user._id,
+    id: user._id,
+    username: user.name || (user.isGuest ? "Guest" : ""),
+    useremail: user.email || "",
+    isGuest: user.isGuest === true,
+    isPro: user.isPro === true,
+    limit: generationLimit.limit,
+    generationLimit,
+    user: {
+      id: user._id.toString(),
+      email: user.email || "",
+      name: user.name || "",
+      isGuest: user.isGuest === true,
+      isPro: user.isPro === true,
+      limit: generationLimit.limit,
+      generationLimit,
+      emailVerified: user.emailVerified === true,
+    },
+  };
+}
+
+function guestEmailForDevice(deviceId) {
+  const raw = String(deviceId || Date.now()).trim();
+  const safe = raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || Date.now().toString();
+  return `guest_${safe}@bizideasai.guest`;
+}
 const isValidOTP = (otp) => typeof otp === "string" && /^\d{6}$/.test(otp);
+
+function authDebug(event, payload = {}) {
+  console.log(
+    `[auth:${event}]`,
+    JSON.stringify({
+      at: new Date().toISOString(),
+      ...payload,
+    })
+  );
+}
 
 async function handleUserSignUp(req, res) {
   const body = req.body;
@@ -38,21 +115,44 @@ async function handleUserSignUp(req, res) {
   try {
     const hashed = await bcrypt.hash(body.password, 10);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const normalizedEmail = String(body.email || "").trim().toLowerCase();
+
+    authDebug("signup:start", {
+      email: normalizedEmail,
+      name: body.name,
+      otp,
+    });
 
     const result = await User.create({
       name: body.name,
-      email: body.email,
+      email: normalizedEmail || body.email,
       profession: body.profession ?? undefined,
       password: hashed,
       image: req.file ? `/uploads/${req.file.filename}` : null,
       otp,
       emailVerified: false,
     });
+    authDebug("signup:user-created", {
+      userId: result._id,
+      email: result.email,
+      otp,
+    });
 
     try {
-      await sendOTPEmail(body.email.trim(), otp);
+      await sendOTPEmail(result.email.trim(), otp);
+      authDebug("signup:otp-sent", {
+        userId: result._id,
+        email: result.email,
+        otp,
+      });
     } catch (mailErr) {
       console.error("OTP email error:", mailErr);
+      authDebug("signup:otp-send-failed", {
+        userId: result._id,
+        email: result.email,
+        otp,
+        error: mailErr?.message || String(mailErr),
+      });
       await User.findByIdAndDelete(result._id);
       return res.status(500).json({ error: OTP_SEND_FAILED });
     }
@@ -71,6 +171,10 @@ async function handleUserSignUp(req, res) {
 async function handleVerifyOTP(req, res) {
   try {
     const { userId, otp } = req.body;
+    authDebug("otp-verify:start", {
+      userId,
+      providedOtp: otp == null ? null : String(otp).trim(),
+    });
     if (
       userId == null ||
       otp === undefined ||
@@ -82,18 +186,47 @@ async function handleVerifyOTP(req, res) {
 
     const user = await User.findById(userId);
     if (!user) {
+      authDebug("otp-verify:user-not-found", {
+        userId,
+        providedOtp: String(otp).trim(),
+      });
       return res.status(400).json({ error: USER_NOT_FOUND });
     }
 
     if (user.otp !== String(otp).trim()) {
+      authDebug("otp-verify:invalid", {
+        userId: user._id,
+        email: user.email,
+        providedOtp: String(otp).trim(),
+        expectedOtp: user.otp,
+        isGuest: user.isGuest === true,
+      });
       return res.status(400).json({ error: INVALID_OTP });
     }
 
+    authDebug("otp-verify:success", {
+      userId: user._id,
+      email: user.email,
+      otp: String(otp).trim(),
+      wasGuest: user.isGuest === true,
+    });
+    const wasGuest = user.isGuest === true;
     user.emailVerified = true;
     user.otp = null;
     await user.save();
 
-    res.json({ message: "Email verified successfully." });
+    user.isGuest = false;
+    await user.save();
+    if (wasGuest && user.email) {
+      PromptGeneration.updateMany(
+        { userId: user._id },
+        { $set: { generatedBy: user.email } }
+      ).catch((err) => {
+        console.error("[guest-upgrade] failed to update prompt email:", err);
+      });
+    }
+
+    res.json(makeAuthPayload(user, "Email verified successfully."));
   } catch (err) {
     console.error("verify OTP error:", err);
     res.status(500).json({ error: NETWORK_ERROR });
@@ -124,15 +257,7 @@ async function handleUserLogin(req, res) {
 
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(400).json({ error: WRONG_PASSWORD });
-    const token = setUser(user);
-
-    res.json({
-      success: LOGGED_IN,
-      userId: user._id,
-      token: token,
-      username: user.name,
-      useremail: user.email,
-    });
+    res.json(makeAuthPayload(user));
   } catch (err) {
     res.status(500).json({ error: NETWORK_ERROR });
   }
@@ -170,7 +295,19 @@ async function handleGoogleLogin(req, res) {
         emailVerified: email_verified !== false,
         image: picture || undefined,
       });
+      authDebug("google:user-created", {
+        userId: user._id,
+        email: user.email,
+        googleId: sub,
+        emailVerified: user.emailVerified,
+      });
     } else {
+      authDebug("google:user-found", {
+        userId: user._id,
+        email: user.email,
+        googleId: user.googleId || sub,
+        emailVerified: user.emailVerified,
+      });
       let updated = false;
       if (!user.googleId) {
         user.googleId = sub;
@@ -199,17 +336,158 @@ async function handleGoogleLogin(req, res) {
       });
     }
 
-    const token = setUser(user);
-    res.json({
-      token,
-      id: user._id,
-    });
+    res.json(makeAuthPayload(user));
   } catch (err) {
     console.error("Google login error:", err.message);
     res.status(500).json({ error: "Google authentication failed" });
   }
 }
 
+
+async function handleGuestLogin(req, res) {
+  try {
+    const deviceId = req.body?.deviceId ? String(req.body.deviceId) : "";
+    const email = guestEmailForDevice(req.body?.deviceId);
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = await User.create({
+        name: "Guest",
+        email,
+        isGuest: true,
+        guestDeviceId: deviceId || undefined,
+        emailVerified: false,
+        active: true,
+      });
+      authDebug("guest:created", {
+        userId: user._id,
+        email: user.email,
+        deviceId,
+        isGuest: user.isGuest === true,
+      });
+    } else {
+      authDebug("guest:reused", {
+        userId: user._id,
+        email: user.email,
+        deviceId,
+        isGuest: user.isGuest === true,
+      });
+    }
+    if (user.active === false) {
+      return res.status(403).json({ error: "Your account is deactivated. Please contact support." });
+    }
+    if (user.isBanned) {
+      return res.status(403).json({
+        error: "Your account is banned. Please contact support.",
+        bannedReason: user.bannedReason || "",
+      });
+    }
+    res.json(makeAuthPayload(user, "Guest session created"));
+  } catch (err) {
+    console.error("guest login error:", err);
+    res.status(500).json({ error: "Guest login failed" });
+  }
+}
+
+async function handleUpgradeGuest(req, res) {
+  try {
+    const authUser = req.authUser;
+    if (!authUser?._id) return res.status(401).json({ error: "Unauthorized" });
+
+    const { name, email, password } = req.body || {};
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!name) return res.status(400).json({ error: NAME_REQUIRED });
+    if (!normalizedEmail) return res.status(400).json({ error: EMAIL_REQUIRED });
+    if (!isValidEmail(normalizedEmail)) return res.status(400).json({ error: "Invalid email format" });
+    if (!password) return res.status(400).json({ error: PASSWORD_REQUIRED });
+    if (String(password).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+
+    const user = await User.findById(authUser._id);
+    if (!user) return res.status(404).json({ error: USER_NOT_FOUND });
+    if (user.active === false) {
+      return res.status(403).json({ error: "Your account is deactivated. Please contact support." });
+    }
+    if (user.isBanned) {
+      return res.status(403).json({
+        error: "Your account is banned. Please contact support.",
+        bannedReason: user.bannedReason || "",
+      });
+    }
+    const currentEmail = String(user.email || "").toLowerCase();
+    const isGuestAccount = user.isGuest === true || /^guest_[^@]+@bizideasai\.guest$/i.test(currentEmail);
+    const isPendingUpgrade = user.emailVerified === false && !isGuestAccount;
+    if (!isGuestAccount && !isPendingUpgrade) {
+      return res.status(400).json({ error: "This account is already registered." });
+    }
+
+    const existing = await User.findOne({ email: normalizedEmail, _id: { $ne: user._id } });
+    if (existing) return res.status(409).json({ error: "User already exists" });
+
+    const previous = {
+      name: user.name,
+      email: user.email,
+      password: user.password,
+      emailVerified: user.emailVerified,
+      otp: user.otp,
+      isGuest: user.isGuest,
+    };
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    authDebug("guest-upgrade:start", {
+      userId: user._id,
+      oldEmail: user.email,
+      newEmail: normalizedEmail,
+      name: String(name).trim(),
+      otp,
+      isGuest: user.isGuest === true,
+    });
+    user.name = String(name).trim();
+    user.email = normalizedEmail;
+    user.password = await bcrypt.hash(password, 10);
+    user.emailVerified = false;
+    user.otp = otp;
+    user.isGuest = true;
+    await user.save();
+    authDebug("guest-upgrade:user-updated", {
+      userId: user._id,
+      email: user.email,
+      otp,
+      isGuest: user.isGuest === true,
+    });
+
+    try {
+      await sendOTPEmail(normalizedEmail, otp);
+      authDebug("guest-upgrade:otp-sent", {
+        userId: user._id,
+        email: normalizedEmail,
+        otp,
+      });
+    } catch (mailErr) {
+      console.error("upgrade guest OTP email error:", mailErr);
+      authDebug("guest-upgrade:otp-send-failed", {
+        userId: user._id,
+        email: normalizedEmail,
+        otp,
+        error: mailErr?.message || String(mailErr),
+      });
+      user.name = previous.name;
+      user.email = previous.email;
+      user.password = previous.password;
+      user.emailVerified = previous.emailVerified;
+      user.otp = previous.otp;
+      user.isGuest = previous.isGuest;
+      await user.save();
+      return res.status(500).json({ error: OTP_SEND_FAILED });
+    }
+
+    res.json({
+      message: "OTP sent to email. Verify to finish account setup.",
+      userId: user._id,
+      isGuest: true,
+    });
+  } catch (err) {
+    console.error("upgrade guest error:", err);
+    res.status(500).json({ error: NETWORK_ERROR });
+  }
+}
 async function handleGetProfile(req, res) {
   try {
     const { id } = req.params;
@@ -224,6 +502,17 @@ async function handleGetProfile(req, res) {
 
     const o = user.toObject();
     o.fullName = o.name;
+    const generationLimit = generationLimitForUser(user);
+    const used = await PromptGeneration.countDocuments({ userId: user._id });
+    o.limit = generationLimit.limit;
+    o.generationLimit = {
+      ...generationLimit,
+      used: generationLimit.limit == null ? null : used,
+      remaining:
+        generationLimit.limit == null
+          ? null
+          : Math.max(generationLimit.limit - used, 0),
+    };
     res.json(o);
   } catch (err) {
     console.error("getProfile error:", err);
@@ -260,6 +549,7 @@ async function handleUpdateProfile(req, res) {
     if (req.body.newPassword) {
       updates.password = await bcrypt.hash(req.body.newPassword, 10);
     }
+    const previousImage = user.image;
     if (req.file) {
       updates.image = `/uploads/profile/${req.file.filename}`;
     }
@@ -277,9 +567,20 @@ async function handleUpdateProfile(req, res) {
       return res.status(400).json({ message: "No data to update" });
     }
 
-    await User.findByIdAndUpdate(id, updates, { new: true });
+    const updatedUser = await User.findByIdAndUpdate(id, updates, { new: true });
+    if (!updatedUser) {
+      if (req.file) deleteLocalProfileImage(`/uploads/profile/${req.file.filename}`);
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (req.file && previousImage && previousImage !== updates.image) {
+      deleteLocalProfileImage(previousImage);
+    }
     res.json("Your Information Updated");
   } catch (err) {
+    if (req.file) {
+      deleteLocalProfileImage(`/uploads/profile/${req.file.filename}`);
+    }
     console.error("updateProfile error:", err);
     res.status(500).json({ message: "Server error" });
   }
@@ -303,8 +604,18 @@ async function handleForgotPassword(req, res) {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     user.resetOTP = otp;
     await user.save();
+    authDebug("forgot-password:otp-created", {
+      userId: user._id,
+      email: user.email,
+      otp,
+    });
 
     await sendEmail(email, "Reset Password OTP", `Your OTP is ${otp}`);
+    authDebug("forgot-password:otp-sent", {
+      userId: user._id,
+      email: user.email,
+      otp,
+    });
     res.json({ message: "OTP sent" });
   } catch (err) {
     console.error("forgotPassword error:", err);
@@ -344,6 +655,8 @@ async function handleResetPassword(req, res) {
 module.exports = {
   handleUserSignUp,
   handleUserLogin,
+  handleGuestLogin,
+  handleUpgradeGuest,
   handleVerifyOTP,
   handleGoogleLogin,
   handleGetProfile,

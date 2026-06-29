@@ -2,6 +2,8 @@ const express = require("express");
 const {
   handleUserLogin,
   handleUserSignUp,
+  handleGuestLogin,
+  handleUpgradeGuest,
   handleVerifyOTP,
   handleGoogleLogin,
   handleGetProfile,
@@ -19,6 +21,8 @@ router.post("/signup", upload.single("image"), checkUserExistsByEmail, handleUse
 router.post("/verify-otp", handleVerifyOTP);
 router.post("/login", upload.single("image"), handleUserLogin);
 router.post("/google-login", handleGoogleLogin);
+router.post("/guest", handleGuestLogin);
+router.post("/upgrade-guest", authenticate, handleUpgradeGuest);
 
 router.get("/profile/:id", authenticate, handleGetProfile);
 router.put("/profile/:id", authenticate, uploadProfile.single("profileImage"), handleUpdateProfile);

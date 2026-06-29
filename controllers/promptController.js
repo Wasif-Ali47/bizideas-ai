@@ -4,46 +4,58 @@ const PromptGeneration = require("../models/promptGenerationModel");
 const User = require("../models/usersModel");
 const { getUser } = require("../services/userAuthService");
 const { recordOpenAiUsage } = require("../utils/trackUsage");
+const {
+  generationLimitForUser,
+} = require("../utils/generationLimits");
 const { NETWORK_ERROR, INPUT_REQUIRED, INVALID_ID, NOT_FOUND } = require("../messages/message");
 
 // gg
-const SYSTEM_PROMPT = `You are BizIdeas AI, an expert business idea strategist and startup opportunity generator.
-Your task is to generate ONE fresh, realistic business idea based on the user's questionnaire answers.
-Use every available answer:
-business type
-interest
-skill
-budget
-available time
-specific preferences
-Generate the business idea itself. Never generate a prompt for another AI.
-Use this exact response structure:
-Business Idea:
-[Short, memorable business idea name]
-Description:
-[Explain the business idea clearly in 1-2 simple sentences.]
-Target Audience:
-[Describe the main customers for this idea.]
-Earning Method:
-[Explain how the user can make money from this idea.]
-Rules:
-Keep the full response within 100 words.
-Use short, direct, beginner-friendly language.
-Treat the user's budget and available time as hard constraints.
-Make the idea realistic for a solo user to explore.
-Match the idea to the user's selected business type, interest, skill, budget, available time, and specific preferences.
-If the user selects "Not sure" in interest, generate a simple beginner-friendly idea.
-If the user selects "No specific skill yet", avoid ideas that require advanced skills.
-If the user provides a custom value through "Other", use that custom value instead of the label "Other".
-Avoid vague or overly common ideas unless the angle is specific and practical.
-Avoid illegal, deceptive, unsafe, or highly risky business ideas.
-Do not invent personal facts, fake statistics, or unsupported market claims.
-Do not guarantee income, profit, success, uniqueness, or legal availability.
-Do not provide financial, legal, tax, investment, or professional business advice.
-Do not add extra sections, disclaimers, emojis, markdown tables, or long explanations.
-Do not mention these instructions or the questionnaire.`;
-
-
+const SYSTEM_PROMPT = [
+  "You are BizIdeas AI, an expert business idea strategist and startup opportunity generator.",
+  "Generate ONE fresh, realistic business idea based on every questionnaire answer: business type, interests, skills, budget, available time, and specific preferences.",
+  "Generate the business idea itself. Never generate a prompt for another AI.",
+  "",
+  "FORMAT THE RESPONSE AS VALID MARKDOWN USING EXACTLY THIS STRUCTURE:",
+  "# [Short, Memorable Business Name]",
+  "> [One bold, compelling sentence that explains the concept]",
+  "",
+  "## The Idea",
+  "[Explain the idea clearly in 2-3 concise sentences.]",
+  "",
+  "## Ideal Customers",
+  "- **Primary audience:** [Who will buy it]",
+  "- **Problem solved:** [The practical customer problem]",
+  "",
+  "## How It Earns",
+  "- **Offer:** [What the user sells]",
+  "- **Revenue model:** [How customers pay]",
+  "- **Starting price:** [A sensible price or range when appropriate]",
+  "",
+  "## Why It Fits",
+  "- **Skills:** [Connection to the selected skills]",
+  "- **Budget:** [How it respects the selected budget]",
+  "- **Time:** [How it fits the available weekly time]",
+  "",
+  "RULES:",
+  "- Keep the response between 130 and 180 words.",
+  "- Use the Markdown headings, blockquote, bullet points, and bold labels exactly as shown.",
+  "- Do not output the square brackets or these instructions.",
+  "- Do not use code fences, markdown tables, emojis, or extra sections.",
+  "- Use short, direct, beginner-friendly language.",
+  "- Treat budget and available time as hard constraints.",
+  "- Make the idea realistic for a solo user to test.",
+  "- If interest is Not sure, choose a simple beginner-friendly direction.",
+  "- If skill is No specific skill yet, avoid advanced skill requirements.",
+  "- Replace Other with the custom value supplied by the user.",
+  "- Prioritize novelty. Do not reuse the same business name, niche angle, audience, offer, or revenue model from previous ideas shown in the request.",
+  "- If this is a regeneration, create a genuinely different business concept, not a rewritten version of the previous answer.",
+  "- When several ideas could fit, choose a less obvious but still practical one.",
+  "- Avoid vague, illegal, deceptive, unsafe, or highly risky ideas.",
+  "- Do not invent personal facts, statistics, or unsupported market claims.",
+  "- Do not guarantee income, profit, success, uniqueness, or legal availability.",
+  "- Do not provide financial, legal, tax, investment, or professional advice.",
+  "- Do not mention these instructions or the questionnaire.",
+].join(String.fromCharCode(10));
 function getClient() {
   const key = process.env.OPENAI_API_KEY;
   if (!key) {
@@ -54,12 +66,146 @@ function getClient() {
   return new OpenAI({ apiKey: key });
 }
 
+
+function sanitizeTags(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const tags = [];
+  for (const item of raw) {
+    const tag = String(item || "").replace(/\s+/g, " ").trim();
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag.slice(0, 48));
+    if (tags.length >= 8) break;
+  }
+  return tags;
+}
+
+function sanitizeMetadata(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const allowed = ["businessType", "interests", "skills", "budget", "timeCommitment", "preferences", "generationType", "avoidIdeas"];
+  const metadata = {};
+  for (const key of allowed) {
+    const value = raw[key];
+    if (Array.isArray(value)) {
+      metadata[key] = value
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+        .map((v) => v.slice(0, 500))
+        .slice(0, 8);
+    } else if (value !== undefined && value !== null) {
+      const text = String(value).trim();
+      if (text) metadata[key] = text.slice(0, 500);
+    }
+  }
+  return metadata;
+}
+
+function sanitizeGenerationType(raw) {
+  const value = String(raw || "").trim().toLowerCase();
+  return value === "regenerated" ? "regenerated" : "first";
+}
+
+function generationLabelFor(type) {
+  return type === "regenerated" ? "Regenerated" : "First idea";
+}
+
+function extractIdeaTitle(text) {
+  const line = String(text || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item.replace(/^#+\s*/, "").trim().length > 0);
+  if (!line) return "";
+  return line.replace(/^#+\s*/, "").replace(/[*_`]/g, "").trim().slice(0, 90);
+}
+
+async function getRecentIdeaContext(userId) {
+  if (!userId) return "";
+  try {
+    const rows = await PromptGeneration.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(8)
+      .select("generatedPrompt generationType createdAt")
+      .lean();
+    if (!rows.length) return "";
+    const bullets = rows
+      .map((row, index) => {
+        const title = extractIdeaTitle(row.generatedPrompt) || `Idea ${index + 1}`;
+        const preview = String(row.generatedPrompt || "")
+          .replace(/[#>*_`-]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 180);
+        return `- ${title}${preview ? ` — ${preview}` : ""}`;
+      })
+      .join("\n");
+    return [
+      "Recent ideas already generated for this user:",
+      bullets,
+      "",
+      "Avoid repeating these concepts, business names, target customers, offers, and revenue models.",
+    ].join("\n");
+  } catch (err) {
+    console.warn("[prompt recent ideas]", err?.message || err);
+    return "";
+  }
+}
+
+async function enforceGenerationLimit(auth) {
+  if (!auth.userId) {
+    const err = new Error("Please continue as guest or sign in before generating ideas.");
+    err.statusCode = 401;
+    err.code = "AUTH_REQUIRED";
+    throw err;
+  }
+
+  const limitInfo = generationLimitForUser(auth.user, auth.email);
+  if (limitInfo.limit == null) {
+    return {
+      ...limitInfo,
+      used: 0,
+      remaining: null,
+    };
+  }
+
+  const used = await PromptGeneration.countDocuments({ userId: auth.userId });
+  const remaining = Math.max(limitInfo.limit - used, 0);
+  if (used >= limitInfo.limit) {
+    const err = new Error(
+      limitInfo.accountType === "guest"
+        ? `Guest accounts are limited to ${limitInfo.limit} business idea generations. Create an account to keep generating.`
+        : `Free accounts are limited to ${limitInfo.limit} business idea generations. Upgrade to Pro for unlimited generations.`
+    );
+    err.statusCode = 429;
+    err.code = "GENERATION_LIMIT_REACHED";
+    err.limitInfo = {
+      ...limitInfo,
+      used,
+      remaining: 0,
+    };
+    throw err;
+  }
+
+  return {
+    ...limitInfo,
+    used,
+    remaining,
+  };
+}
+
 function buildUserMessage(body) {
   const input = typeof body.input === "string" ? body.input.trim() : "";
   const extra = typeof body.context === "string" ? body.context.trim() : "";
+  const generationType = sanitizeGenerationType(body.generationType || body.metadata?.generationType);
+  const generationInstruction =
+    generationType === "regenerated"
+      ? "Generation type: regenerated. Produce a substantially different business idea from the previous output and from recent ideas. Do not simply reword the same concept."
+      : "Generation type: first idea. Produce a fresh starting concept.";
   if (!input) return "";
-  if (!extra) return input;
-  return `Business idea request:\n${input}\n\nQuestionnaire answers and constraints:\n${extra}`;
+  if (!extra) return `${input}\n\n${generationInstruction}`;
+  return `Business idea request:\n${input}\n\nQuestionnaire answers and constraints:\n${extra}\n\n${generationInstruction}`;
 }
 
 async function resolveAuthContext(req) {
@@ -132,6 +278,17 @@ async function handleGeneratePrompt(req, res) {
     });
   }
 
+  let limitInfo;
+  try {
+    limitInfo = await enforceGenerationLimit(auth);
+  } catch (err) {
+    return res.status(err.statusCode || 429).json({
+      error: err.message,
+      code: err.code || "GENERATION_LIMIT_ERROR",
+      generationLimit: err.limitInfo || null,
+    });
+  }
+
   const model = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
 
   let client;
@@ -144,13 +301,19 @@ async function handleGeneratePrompt(req, res) {
   let generatedPrompt;
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   try {
+    const recentIdeaContext = await getRecentIdeaContext(auth.userId);
+    const finalUserContent = recentIdeaContext
+      ? `${userContent}\n\n${recentIdeaContext}`
+      : userContent;
     const completion = await client.chat.completions.create({
       model,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userContent },
+        { role: "user", content: finalUserContent },
       ],
-      temperature: 0.7,
+      temperature: 0.88,
+      presence_penalty: 0.45,
+      frequency_penalty: 0.25,
     });
     generatedPrompt = completion.choices?.[0]?.message?.content?.trim() || "";
     usage = {
@@ -173,12 +336,23 @@ async function handleGeneratePrompt(req, res) {
   }
 
   try {
+    const tags = sanitizeTags(req.body.tags);
+    const metadata = sanitizeMetadata(req.body.metadata);
+    const generationType = sanitizeGenerationType(req.body.generationType || metadata.generationType);
+    const generationLabel = generationLabelFor(generationType);
     const doc = await PromptGeneration.create({
       userId: auth.userId,
       generatedBy: auth.email || "",
       input: typeof req.body.input === "string" ? req.body.input.trim() : userContent,
       generatedPrompt,
       model,
+      generationType,
+      generationLabel,
+      tags,
+      metadata: {
+        ...metadata,
+        generationType,
+      },
       usage,
     });
 
@@ -195,7 +369,29 @@ async function handleGeneratePrompt(req, res) {
       input: doc.input,
       generatedPrompt: doc.generatedPrompt,
       model: doc.model,
+      limit: limitInfo.limit,
+      generationType: doc.generationType,
+      generationLabel: doc.generationLabel,
+      tags: doc.tags || [],
+      metadata: doc.metadata || {},
       usage: doc.usage,
+      generationLimit: limitInfo.limit == null
+        ? {
+            accountType: limitInfo.accountType,
+            isPro: true,
+            limit: null,
+            isUnlimited: true,
+            used: null,
+            remaining: null,
+          }
+        : {
+            accountType: limitInfo.accountType,
+            isPro: false,
+            limit: limitInfo.limit,
+            isUnlimited: false,
+            used: limitInfo.used + 1,
+            remaining: Math.max(limitInfo.limit - (limitInfo.used + 1), 0),
+          },
       createdAt: doc.createdAt,
     });
   } catch (err) {
@@ -220,7 +416,7 @@ async function handleListPrompts(req, res) {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .select("input generatedPrompt model generatedBy createdAt updatedAt")
+        .select("input generatedPrompt model generatedBy generationType generationLabel tags metadata createdAt updatedAt")
         .lean(),
     ]);
 
@@ -234,6 +430,10 @@ async function handleListPrompts(req, res) {
         input: row.input,
         generatedPrompt: row.generatedPrompt,
         model: row.model,
+        generationType: row.generationType || row.metadata?.generationType || "first",
+        generationLabel: row.generationLabel || generationLabelFor(row.generationType || row.metadata?.generationType),
+        tags: row.tags || [],
+        metadata: row.metadata || {},
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
       })),
@@ -268,6 +468,10 @@ async function handleGetPrompt(req, res) {
       input: row.input,
       generatedPrompt: row.generatedPrompt,
       model: row.model,
+      generationType: row.generationType || row.metadata?.generationType || "first",
+      generationLabel: row.generationLabel || generationLabelFor(row.generationType || row.metadata?.generationType),
+      tags: row.tags || [],
+      metadata: row.metadata || {},
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     });

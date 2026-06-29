@@ -31,6 +31,21 @@ const userSchema = new mongoose.Schema(
     googleId: {
       type: String,
     },
+    isGuest: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    isPro: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    guestDeviceId: {
+      type: String,
+      trim: true,
+      index: true,
+    },
     resetOTP: {
       type: String,
     },
