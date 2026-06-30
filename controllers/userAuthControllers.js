@@ -7,6 +7,7 @@ const { setUser } = require("../services/userAuthService");
 const { sendOTPEmail, sendEmail } = require("../services/emailService");
 const User = require("../models/usersModel");
 const PromptGeneration = require("../models/promptGenerationModel");
+const SavedIdea = require("../models/savedIdeaModel");
 const { generationLimitForUser } = require("../utils/generationLimits");
 const {
   NETWORK_ERROR,
@@ -586,6 +587,38 @@ async function handleUpdateProfile(req, res) {
   }
 }
 
+async function handleDeleteAccount(req, res) {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid user ID" });
+    }
+
+    if (req.authUser?._id?.toString() !== id) {
+      return res.status(403).json({ message: "You can only delete your own account." });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    await Promise.all([
+      PromptGeneration.deleteMany({ userId: user._id }),
+      SavedIdea.deleteMany({ userId: user._id }),
+    ]);
+
+    const oldImage = user.image;
+    await User.deleteOne({ _id: user._id });
+    deleteLocalProfileImage(oldImage);
+
+    return res.json({ message: "Account deleted successfully." });
+  } catch (err) {
+    console.error("deleteAccount error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+}
+
 async function handleForgotPassword(req, res) {
   try {
     const { email } = req.body;
@@ -661,6 +694,7 @@ module.exports = {
   handleGoogleLogin,
   handleGetProfile,
   handleUpdateProfile,
+  handleDeleteAccount,
   handleForgotPassword,
   handleResetPassword,
 };

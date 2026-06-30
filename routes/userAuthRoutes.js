@@ -8,6 +8,7 @@ const {
   handleGoogleLogin,
   handleGetProfile,
   handleUpdateProfile,
+  handleDeleteAccount,
   handleForgotPassword,
   handleResetPassword,
 } = require("../controllers/userAuthControllers");
@@ -26,6 +27,7 @@ router.post("/upgrade-guest", authenticate, handleUpgradeGuest);
 
 router.get("/profile/:id", authenticate, handleGetProfile);
 router.put("/profile/:id", authenticate, uploadProfile.single("profileImage"), handleUpdateProfile);
+router.delete("/profile/:id", authenticate, handleDeleteAccount);
 
 router.post("/forgot-password", handleForgotPassword);
 router.post("/reset-password", handleResetPassword);

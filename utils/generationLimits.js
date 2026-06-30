@@ -1,5 +1,5 @@
-const GUEST_GENERATION_LIMIT = 5;
-const FREE_GENERATION_LIMIT = 15;
+const GUEST_GENERATION_LIMIT = 3;
+const FREE_GENERATION_LIMIT = null;
 
 function isGuestUser(user, email) {
   const normalized = String(user?.email || email || "")
@@ -34,7 +34,7 @@ function generationLimitForUser(user, email) {
     isPro: false,
     accountType: "free",
     limit: FREE_GENERATION_LIMIT,
-    isUnlimited: false,
+    isUnlimited: true,
   };
 }
 
